@@ -1,11 +1,11 @@
 {
   "name": "node-red-context-redis",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "A Node-RED Context store plugin backed by Redis",
   "main": "index.js",
   "scripts": {
-    "test": "nyc --cache mocha ./test/_spec.js --timeout=8000",
-    "coverage": "nyc report --reporter=lcov --reporter=html"
+    "test": "mocha ./test/_spec.js --timeout=8000",
+    "coverage": "nyc --reporter=lcov --reporter=text mocha ./test/_spec.js --timeout=8000"
   },
   "repository": {
     "type": "git",
@@ -13,22 +13,31 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@node-red/util": "0.20.0-beta.2",
     "json-stringify-safe": "^5.0.1",
-    "redis": "^2.8.0"
+    "redis": "^6.0.0"
+  },
+  "peerDependencies": {
+    "@node-red/util": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@node-red/util": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "mocha": "^5.2.0",
-    "nyc": "^10.0.0",
-    "should": "^13.2.1",
+    "@node-red/util": "^5.0.0",
+    "mocha": "^10.8.2",
+    "nyc": "^17.1.0",
+    "should": "^13.2.3",
     "should-sinon": "0.0.6",
-    "sinon": "^7.2.2"
+    "sinon": "^19.0.2"
   },
   "keywords": [
     "node-red",
-    "redis"
+    "redis",
+    "context"
   ],
   "engines": {
-    "node": ">=8"
+    "node": ">=18"
   }
 }
