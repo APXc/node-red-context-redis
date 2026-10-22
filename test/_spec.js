@@ -39,7 +39,7 @@ describe('redis', function () {
         it('should connect to redis', function () {
             const context = redisPlugin({});
             return context.open().then(() => {
-                context.client.connected.should.be.true();
+                context.client.isReady.should.be.true();
                 return context.close();
             });
 
@@ -47,22 +47,27 @@ describe('redis', function () {
         it('should load configs', function () {
             const fakeCreateClient = function () {
                 return {
-                    SCRIPT: (a, b, cb) => cb(null),
+                    connect: () => Promise.resolve(),
                     on: () => { }
                 };
             };
             const stubCreateClient = sinon.stub(redis, "createClient").callsFake(fakeCreateClient);
-            const context = redisPlugin({ host: "foo", port: 12345, db: 1, prefix: "bar", password: "baz", tls: { a: "b" } });
+            const context = redisPlugin({ host: "foo", port: 12345, db: 1, prefix: "bar", username: "qux", password: "baz", tls: { ca: "b" } });
             return context.open().then(function () {
                 context.should.have.properties({ host: "foo", port: 12345, prefix: "bar" });
-                context.options.should.have.properties({ db: 1, password: "baz", tls: { a: "b" } });
-                stubCreateClient.should.be.calledWithMatch(12345, "foo", { db: 1, password: "baz", tls: { a: "b" } });
+                context.options.should.have.properties({ database: 1, username: "qux", password: "baz" });
+                context.options.socket.should.have.properties({ host: "foo", port: 12345, tls: true, ca: "b" });
+                stubCreateClient.should.be.calledWithMatch({ database: 1, password: "baz", socket: { host: "foo", port: 12345 } });
             }).finally(() => {
                 stubCreateClient.restore();
             });
         });
+        it('should map a legacy retry_strategy returning undefined to "stop retrying"', function () {
+            const context = redisPlugin({ host: "foobar.invalid", retry_strategy: () => undefined, connectTimeout: 2000 });
+            return context.open().should.be.rejected();
+        });
         it('should throw an error if cannot connect to redis', function () {
-            const context = redisPlugin({ host: "foobar", retry_strategy: () => undefined });
+            const context = redisPlugin({ host: "foobar.invalid", reconnectStrategy: false, connectTimeout: 2000 });
             return context.open().should.be.rejected();
         });
     });
@@ -75,7 +80,7 @@ describe('redis', function () {
             return context.open();
         });
         afterEach(function () {
-            return context.delete("*").then(() => context.clean([]));
+            return context.delete("global").then(() => context.clean([]));
         });
         after(function () {
             return context.close();
@@ -317,6 +322,78 @@ describe('redis', function () {
             });
         });
 
+        it('should keep number precision and empty arrays when setting a nested property', function (done) {
+            const original = { big: 9007199254740991, float: 1729600000123.456, empty: [], obj: {}, list: [[], {}] };
+            context.set("nodeX", "foo", original, function (err) {
+                if (err) { return done(err); }
+                context.set("nodeX", "foo.nested.value", "x", function (err) {
+                    if (err) { return done(err); }
+                    context.get("nodeX", "foo", function (err, value) {
+                        if (err) { return done(err); }
+                        value.should.eql({ big: 9007199254740991, float: 1729600000123.456, empty: [], obj: {}, list: [[], {}], nested: { value: "x" } });
+                        Array.isArray(value.empty).should.be.true();
+                        done();
+                    });
+                });
+            });
+        });
+
+        it('should store the same JSON as JSON.stringify for a nested write', function (done) {
+            context.set("nodeX", "foo.a", [1, 2.5, "x", null, { b: [] }], function (err) {
+                if (err) { return done(err); }
+                context.client.get(prefix + ":nodeX:foo").then((raw) => {
+                    raw.should.equal(JSON.stringify({ a: [1, 2.5, "x", null, { b: [] }] }));
+                    done();
+                }).catch(done);
+            });
+        });
+
+        it('should apply concurrent nested writes without losing updates', function (done) {
+            const writes = [];
+            for (let i = 0; i < 25; i++) {
+                writes.push(new Promise((res, rej) => context.set("nodeX", "counter.k" + i, i, err => err ? rej(err) : res())));
+            }
+            Promise.all(writes).then(() => {
+                context.get("nodeX", "counter", function (err, value) {
+                    if (err) { return done(err); }
+                    Object.keys(value).should.have.length(25);
+                    value.k0.should.equal(0);
+                    value.k24.should.equal(24);
+                    done();
+                });
+            }).catch(done);
+        });
+
+        it('should survive an external change between read and write (WATCH retry)', function (done) {
+            context.set("nodeX", "race", { a: 1 }, function (err) {
+                if (err) { return done(err); }
+                // Monkey-patch mGet once: simulate another process changing the key mid-transaction.
+                const realMGet = context.client.mGet.bind(context.client);
+                let tampered = false;
+                context.client.mGet = async function (keys) {
+                    const r = await realMGet(keys);
+                    if (!tampered) {
+                        tampered = true;
+                        const other = redis.createClient({ socket: { host: "127.0.0.1", port: 6379 } });
+                        await other.connect();
+                        await other.set(prefix + ":nodeX:race", JSON.stringify({ a: 1, external: true }));
+                        await other.quit();
+                    }
+                    return r;
+                };
+                context.set("nodeX", "race.b", 2, function (err) {
+                    context.client.mGet = realMGet;
+                    if (err) { return done(err); }
+                    context.get("nodeX", "race", function (err, value) {
+                        if (err) { return done(err); }
+                        value.should.eql({ a: 1, external: true, b: 2 });
+                        tampered.should.be.true();
+                        done();
+                    });
+                });
+            });
+        });
+
         it('should set/get multiple values', function (done) {
             context.set("nodeX", ["one", "two", "three"], ["test1", "test2", "test3"], function (err) {
                 context.get("nodeX", ["one", "two"], function () {
@@ -466,7 +543,7 @@ describe('redis', function () {
             return context.open();
         });
         afterEach(function () {
-            return context.delete("*").then(() => context.clean([]));
+            return context.delete("global").then(() => context.clean([]));
         });
         after(function () {
             return context.close();
@@ -543,7 +620,7 @@ describe('redis', function () {
             return context.open();
         });
         afterEach(function () {
-            return context.delete("*").then(() => context.clean([]));
+            return context.delete("global").then(() => context.clean([]));
         });
         after(function () {
             return context.close();
@@ -629,6 +706,34 @@ describe('redis', function () {
                 return redisGet("nodeY:flow2", "foo").should.be.fulfilledWith(undefined);
             }).then(function () {
                 return redisGet("global", "foo").should.be.fulfilledWith("testGlobal");
+            });
+        });
+
+        it('should match active ids exactly, not by string prefix', function () {
+            return redisSet("abc", "foo", "flowABC").then(function () {
+                return redisSet("abcd", "foo", "flowABCD");
+            }).then(function () {
+                return context.clean(["abc"]);
+            }).then(function () {
+                return redisGet("abc", "foo").should.be.fulfilledWith("flowABC");
+            }).then(function () {
+                return redisGet("abcd", "foo").should.be.fulfilledWith(undefined);
+            });
+        });
+
+        it('should not touch the database when no prefix is configured', function () {
+            const unprefixed = redisPlugin({});
+            return unprefixed.open().then(function () {
+                return unprefixed.client.set("someone-elses-key", "keep me");
+            }).then(function () {
+                return unprefixed.clean([]);
+            }).then(function () {
+                return unprefixed.client.get("someone-elses-key");
+            }).then(function (value) {
+                value.should.equal("keep me");
+                return unprefixed.client.del("someone-elses-key");
+            }).finally(function () {
+                return unprefixed.close();
             });
         });
 

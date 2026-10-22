@@ -1,129 +1,101 @@
-***This is a work in progress.***
+# node-red-context-redis
 
-# Redis plugin
+A [Node-RED context store](https://nodered.org/docs/api/context/) backed by Redis.
 
-The Redis plugin holds context data in the Redis.
-
-## Pre-requisite
-
-To run this you need a Redis server running. For details see <a href="http://redis.io/" target="_new">the Redis site</a>.
+Tested with Node.js 18/20/22, Redis 7 and Node-RED 5.
 
 ## Install
 
-1. Run the following command in your Node-RED user directory - typically `~/.node-red`
+In your Node-RED user directory (typically `~/.node-red`, or `/data` in the official Docker image):
 
-    npm install git+https://github.com/node-red/node-red-context-redis
+```sh
+npm install git+https://github.com/node-red/node-red-context-redis
+```
 
-1. Add a configuration in settings.js:
+Then register the store in `settings.js`:
 
 ```javascript
 contextStorage: {
+    default: "memoryOnly",
+    memoryOnly: { module: "memory" },
     redis: {
         module: require("node-red-context-redis"),
         config: {
-            // see below options
+            host: process.env.REDIS_HOST || "127.0.0.1",
+            port: 6379,
+            password: process.env.REDIS_PASSWORD,
+            prefix: "nodered"
         }
     }
 }
 ```
 
-### Options
+The module must be passed with `require(...)`: Node-RED treats a plain string as the name of a built-in store.
 
-This plugin exposes some options defined in [node_redis](https://github.com/NodeRedis/node_redis) as itself options.
-It needs following configuration options:
+## Options
 
-| Options        | Description                                                                                                 |
-| -------------- | ----------------------------------------------------------------------------------------------------------- |
-| host           | The IP address of the Redis server.    `Default: "127.0.0.1"`                                               |
-| port           | The port of the Redis server.          `Default: 6379`                                                      |
-| db             | The Redis logical database to connect. `Default: 0`                                                         |
-| prefix         | If set, the string used to prefix all used keys.                                                            |
-| password       | If set, the plugin will run Redis AUTH command on connect. *Note: the password will be sent as plaintext.*  |
-| tls            | An object containing options to pass to tls.connect to set up a TLS connection to the server.               |
-| retry_strategy | Specifies a function to reconnect if the connection to Redis is lost.                                       |
-|                | `default: undefined (Use the default retry strategy)`                                                       |
+| Option              | Description                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `host`              | Redis host. Default `"127.0.0.1"`                                                                             |
+| `port`              | Redis port. Default `6379`                                                                                    |
+| `db`                | Redis logical database. Default `0`                                                                           |
+| `prefix`            | Prefix for every key written by the plugin. **Recommended**: without a prefix the plugin cannot tell its keys from anything else in the database, so stale context is never cleaned up. Use a different prefix per Node-RED instance sharing the same Redis. |
+| `username`          | Redis ACL user (Redis 6+)                                                                                     |
+| `password`          | Password sent with `AUTH` on connect                                                                          |
+| `tls`               | `true`, or an object of [`tls.connect`](https://nodejs.org/api/tls.html#tlsconnectoptions-callback) options    |
+| `url`               | `redis://user:pass@host:port/db` – alternative to `host`/`port`/`db`                                           |
+| `reconnectStrategy` | `false`, a delay in ms, or `(retries, cause) => false \| ms \| Error`. See the [node-redis docs](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md). Default: retry with backoff. `retry_strategy` is accepted as a legacy alias. |
+| `connectTimeout`    | Socket connect timeout in ms                                                                                   |
+| `clientOptions`     | Extra options merged into node-redis `createClient()`                                                         |
 
-see https://github.com/NodeRedis/node_redis#options-object-properties
+With the default reconnect strategy `open()` waits until Redis is reachable, so Node-RED startup blocks until the connection succeeds.
 
-## Data Model
+## Usage notes
 
-```text
-Node-RED                      Redis
-+-------------------+         +-------------------------------+
-| global context    |         | logical database              |
-| +---------------+ |         | +---------------------------+ |
-| | +-----+-----+ | |         | | +-----------------+-----+ | |
-| | | key |value| | | <-----> | | | global:key      |value| | |
-| | +-----+-----+ | |         | | +-----------------+-----+ | |
-| +---------------+ |         | |                           | |
-|                   |         | |                           | |
-| flow context      |         | |                           | |
-| +---------------+ |         | |                           | |
-| | +-----+-----+ | |         | | +-----------------+-----+ | |
-| | | key |value| | | <-----> | | | <flow's id>:key |value| | |
-| | +-----+-----+ | |         | | +-----------------+-----+ | |
-| +---------------+ |         | |                           | |
-|                   |         | |                           | |
-| node context      |         | |                           | |
-| +---------------+ |         | |                           | |
-| | +-----+-----+ | |         | | +-----------------+-----+ | |
-| | | key |value| | | <-----> | | | <node's id>:key |value| | |
-| | +-----+-----+ | |         | | +-----------------+-----+ | |
-| +---------------+ |         | +---------------------------+ |
-+-------------------+         +-------------------------------+
-```
+- Access is asynchronous only. Use the callback form in Function nodes:
 
-- This plugin uses a Redis logical database for all context scope.
-- This plugin prefixes all used keys with context scope in order to identify the scope of the key.
-  - The keys of `global context` will be prefixed with `global:` .
-    e.g.  Set `"foo"` to hold `"bar"` in the global context -> Set `"global:foo"` to hold `"bar"` in the Redis logical database.
-  - The keys of `flow context` will be prefixed with `<id of the flow>:` .
-    e.g.  Set `"foo"` to hold `"bar"` in the flow context whose id is `8588e4b8.784b38` -> Set `"8588e4b8.784b38:foo"` to hold `"bar"` in the Redis.
-  - The keys of `node context` will be prefixed with `<id of the node>:` .
-    e.g.  Set `"foo"` to hold `"bar"` in the node context whose id is `80d8039e.2b82:8588e4b8.784b38` -> Set `"80d8039e.2b82:8588e4b8.784b38:foo"` to hold `"bar"` in the Redis.
+  ```javascript
+  flow.get("counter", "redis", (err, value) => { ... });
+  flow.set("counter", 1, "redis", (err) => { ... });
+  ```
 
-## Data Structure
+  `flow.get("counter", "redis")` without a callback throws, as it must for any network-backed store.
 
-- This plugin converts a value of context to JSON and stores it as string type to the Redis.
-- After getting a value from the Redis, the plugin also converts the value to an object or a primitive value.
+- Every write is a Redis transaction. Writes to a nested property (`flow.set("obj.a.b", 1)`) read the root value, apply the change with Node-RED's own property logic and write it back under `WATCH`, so concurrent writers (including other processes) cannot lose updates. Writes are serialised per connection.
+
+- On deploy, Node-RED asks the store to drop the context of nodes and flows that no longer exist. This only happens when a `prefix` is configured (see above).
+
+## Data model
+
+Each root context property is one Redis string holding its JSON value, exactly as produced by `JSON.stringify`:
 
 ```text
-Node-RED                                 Redis
-+------------------------------+         +---------------------------------------------+
-| global context               |         | logical database                            |
-| +--------------------------+ |         | +-----------------------------------------+ |
-| | +--------+-------------+ | |         | | +---------------+---------------------+ | |
-| | | str    | "foo"       | | | <-----> | | | global:str    | "\"foo\""           | | |
-| | +--------+-------------+ | |         | | +---------------+---------------------+ | |
-| | | num    | 1           | | | <-----> | | | global:num    | "1"                 | | |
-| | +--------+-------------+ | |         | | +---------------+---------------------+ | |
-| | | nstr   | "10"        | | | <-----> | | | global:nstr   | "\"10\""            | | |
-| | +--------+-------------+ | |         | | +---------------+---------------------+ | |
-| | | bool   | false       | | | <-----> | | | global:bool   | "false"             | | |
-| | +--------+-------------+ | |         | | +---------------+---------------------+ | |
-| | | arr    | ["a","b"]   | | | <-----> | | | global:arr    | "[\"a\",\"b\"]"     | | |
-| | +--------+-------------+ | |         | | +---------------+---------------------+ | |
-| | | obj    | {foo,"bar"} | | | <-----> | | | global:obj    | "{\"foo\",\"bar\"}" | | |
-| | +--------+-------------+ | |         | | +---------------+---------------------+ | |
-| +--------------------------+ |         | +-----------------------------------------+ |
-+------------------------------+         +---------------------------------------------+
+Node-RED                                  Redis key
+global.set("foo", "bar")               -> [prefix:]global:foo                  "\"bar\""
+flow.set("obj", {a: 1})                -> [prefix:]<flowId>:obj                "{\"a\":1}"
+context.set("n", 1)   (in a node)      -> [prefix:]<nodeId>:<flowId>:n         "1"
 ```
 
-Other Redis client(e.g. redis-cli) can get the value stored by Node-RED like followings.
-
-Node-RED
-
-```javascript
-global.set("foo","bar","redis");
-global.set("obj",{key:"value"},"redis");
-```
-
-redis-cli
+Values can be read by any other client:
 
 ```console
-redis> GET global:foo
-"\"var\""
-redis> GET global:obj
+redis> GET nodered:global:obj
 "{\"key\":\"value\"}"
-redis>
 ```
+
+## Test
+
+Requires a Redis server on `127.0.0.1:6379` without authentication.
+
+```sh
+npm install
+npm test
+```
+
+## Changes in 0.1.0
+
+- Nested writes no longer go through a Lua/cjson script. The old script re-encoded the whole root value with `cjson`, which truncated numbers to 14 significant digits (e.g. `9007199254740991` became `9007199254741000`) and turned empty arrays into `{}`. Values now round-trip exactly.
+- `clean()` deleted nothing when no `prefix` was set (it built `undefined:...` keys). It now cleans with a prefix, matches active ids exactly, uses `SCAN` instead of `KEYS`, and leaves an unprefixed database alone.
+- Client upgraded from `redis@2.8` (2019) to `redis@6`: ACL `username`, `url`, TLS and reconnect options follow node-redis.
+- `@node-red/util` is resolved from the running Node-RED instance (as before) and is an optional peer dependency instead of a pinned `0.20.0-beta.2` install.
+- Requires Node.js 18+.
